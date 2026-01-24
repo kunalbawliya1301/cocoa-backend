@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()  # <-- FORCE load from current working directory
-
+from fastapi import APIRouter
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
@@ -15,6 +15,10 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import jwt
 from passlib.context import CryptContext
+from routes import payments
+
+app.include_router(payments.router)
+api_router = APIRouter()
 
 ROOT_DIR = Path(__file__).parent
 
@@ -27,7 +31,7 @@ client = AsyncIOMotorClient(
 db = client[os.environ['DB_NAME']]
 
 app = FastAPI()
-api_router = APIRouter(prefix="/api")
+app.include_router(payments.router)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
