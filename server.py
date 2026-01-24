@@ -33,7 +33,10 @@ ROOT_DIR = Path(__file__).parent
 # APP & ROUTERS (ORDER MATTERS)
 # ------------------------------------------------------------------
 app = FastAPI()
-api_router = APIRouter()
+api_router = APIRouter(
+    prefix="/api",
+    tags=["API"]
+)
 
 # ------------------------------------------------------------------
 # DATABASE
