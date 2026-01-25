@@ -181,6 +181,8 @@ async def get_me(current_user: User = Depends(get_current_user)):
 # --------------------------------------------------
 # MENU
 # --------------------------------------------------
+
+# GET
 @api_router.get("/menu/items", response_model=List[MenuItem])
 async def get_menu(category: Optional[str] = None):
     q = {"available": True}
@@ -188,13 +190,14 @@ async def get_menu(category: Optional[str] = None):
         q["category"] = category
     return await db.menu_items.find(q, {"_id": 0}).to_list(1000)
 
+# POST
 @api_router.post("/menu/items", response_model=MenuItem)
 async def create_menu(item: MenuItemCreate, admin: User = Depends(get_admin)):
     menu = MenuItem(**item.model_dump())
     await db.menu_items.insert_one(menu.model_dump())
     return menu
 
-# ✅ ✅ ✅ THIS IS THE FIX
+# PUT
 @api_router.put("/menu/items/{item_id}", response_model=MenuItem)
 async def update_menu_item(
     item_id: str,
@@ -222,6 +225,19 @@ async def update_menu_item(
 @api_router.get("/menu/categories")
 async def categories():
     return {"categories": await db.menu_items.distinct("category")}
+
+# DELETE 
+@api_router.delete("/menu/items/{item_id}")
+async def delete_menu_item(
+    item_id: str,
+    admin: User = Depends(get_admin)
+):
+    result = await db.menu_items.delete_one({"id": item_id})
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Menu item not found")
+
+    return {"message": "Menu item deleted successfully"}
 
 # --------------------------------------------------
 # ORDERS
