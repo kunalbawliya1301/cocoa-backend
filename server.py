@@ -245,6 +245,23 @@ async def my_orders(user: User = Depends(get_current_user)):
         {"_id": 0}
     ).sort("created_at", -1).to_list(100)
 
+@api_router.get("/orders/{order_id}", response_model=Order)
+async def get_order_by_id(
+    order_id: str,
+    user: User = Depends(get_current_user)
+):
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # user can see only their order
+    if user.role != "admin" and order["user_id"] != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return order
+
+
 @api_router.get("/admin/orders", response_model=List[Order])
 async def all_orders(admin: User = Depends(get_admin)):
     return await db.orders.find(
