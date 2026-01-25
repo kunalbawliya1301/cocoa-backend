@@ -240,11 +240,17 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
 
 @api_router.get("/orders/my", response_model=List[Order])
 async def my_orders(user: User = Depends(get_current_user)):
-    return await db.orders.find({"user_id": user.id}, {"_id": 0}).to_list(100)
+    return await db.orders.find(
+        {"user_id": user.id},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
 
 @api_router.get("/admin/orders", response_model=List[Order])
 async def all_orders(admin: User = Depends(get_admin)):
-    return await db.orders.find({}, {"_id": 0}).to_list(1000)
+    return await db.orders.find(
+        {},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(1000)
 
 # ✅ GET SINGLE ORDER (USER + ADMIN)
 @api_router.get("/orders/{order_id}", response_model=Order)
