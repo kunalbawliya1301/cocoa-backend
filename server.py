@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
@@ -78,6 +78,7 @@ class MenuItem(BaseModel):
     calories: int
     available: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = None
 
 class MenuItemCreate(BaseModel):
     name: str
@@ -111,9 +112,6 @@ class OrderCreate(BaseModel):
     items: List[OrderItem]
     total_amount: float
 
-class OrderStatusUpdate(BaseModel):
-    status: str
-
 class Testimonial(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -139,16 +137,11 @@ def create_token(data: dict):
 async def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security)
 ):
-    try:
-        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
-        if not user:
-            raise HTTPException(401, "User not found")
-        return User(**user)
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(401, "Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token")
+    payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(401, "User not found")
+    return User(**user)
 
 async def get_admin(user: User = Depends(get_current_user)):
     if user.role != "admin":
@@ -169,7 +162,6 @@ async def signup(data: UserCreate):
     doc["created_at"] = user.created_at.isoformat()
 
     await db.users.insert_one(doc)
-
     token = create_token({"sub": user.id, "role": user.role})
     return {"token": token, "user": user}
 
@@ -194,14 +186,38 @@ async def get_menu(category: Optional[str] = None):
     q = {"available": True}
     if category:
         q["category"] = category
-    items = await db.menu_items.find(q, {"_id": 0}).to_list(1000)
-    return items
+    return await db.menu_items.find(q, {"_id": 0}).to_list(1000)
 
 @api_router.post("/menu/items", response_model=MenuItem)
 async def create_menu(item: MenuItemCreate, admin: User = Depends(get_admin)):
     menu = MenuItem(**item.model_dump())
     await db.menu_items.insert_one(menu.model_dump())
     return menu
+
+# ✅ ✅ ✅ THIS IS THE FIX
+@api_router.put("/menu/items/{item_id}", response_model=MenuItem)
+async def update_menu_item(
+    item_id: str,
+    item: MenuItemCreate,
+    admin: User = Depends(get_admin)
+):
+    existing = await db.menu_items.find_one({"id": item_id})
+    if not existing:
+        raise HTTPException(404, "Menu item not found")
+
+    updated = {
+        **item.model_dump(),
+        "id": item_id,
+        "created_at": existing.get("created_at"),
+        "updated_at": datetime.now(timezone.utc)
+    }
+
+    await db.menu_items.update_one(
+        {"id": item_id},
+        {"$set": updated}
+    )
+
+    return MenuItem(**updated)
 
 @api_router.get("/menu/categories")
 async def categories():
