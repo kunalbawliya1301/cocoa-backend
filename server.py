@@ -1,5 +1,4 @@
 import os
-import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
@@ -112,6 +111,9 @@ class OrderCreate(BaseModel):
     items: List[OrderItem]
     total_amount: float
 
+class OrderStatusUpdate(BaseModel):
+    status: str
+
 class Testimonial(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -181,8 +183,6 @@ async def get_me(current_user: User = Depends(get_current_user)):
 # --------------------------------------------------
 # MENU
 # --------------------------------------------------
-
-# GET
 @api_router.get("/menu/items", response_model=List[MenuItem])
 async def get_menu(category: Optional[str] = None):
     q = {"available": True}
@@ -190,20 +190,14 @@ async def get_menu(category: Optional[str] = None):
         q["category"] = category
     return await db.menu_items.find(q, {"_id": 0}).to_list(1000)
 
-# POST
 @api_router.post("/menu/items", response_model=MenuItem)
 async def create_menu(item: MenuItemCreate, admin: User = Depends(get_admin)):
     menu = MenuItem(**item.model_dump())
     await db.menu_items.insert_one(menu.model_dump())
     return menu
 
-# PUT
 @api_router.put("/menu/items/{item_id}", response_model=MenuItem)
-async def update_menu_item(
-    item_id: str,
-    item: MenuItemCreate,
-    admin: User = Depends(get_admin)
-):
+async def update_menu_item(item_id: str, item: MenuItemCreate, admin: User = Depends(get_admin)):
     existing = await db.menu_items.find_one({"id": item_id})
     if not existing:
         raise HTTPException(404, "Menu item not found")
@@ -215,29 +209,19 @@ async def update_menu_item(
         "updated_at": datetime.now(timezone.utc)
     }
 
-    await db.menu_items.update_one(
-        {"id": item_id},
-        {"$set": updated}
-    )
-
+    await db.menu_items.update_one({"id": item_id}, {"$set": updated})
     return MenuItem(**updated)
+
+@api_router.delete("/menu/items/{item_id}")
+async def delete_menu_item(item_id: str, admin: User = Depends(get_admin)):
+    result = await db.menu_items.delete_one({"id": item_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Menu item not found")
+    return {"message": "Menu item deleted successfully"}
 
 @api_router.get("/menu/categories")
 async def categories():
     return {"categories": await db.menu_items.distinct("category")}
-
-# DELETE 
-@api_router.delete("/menu/items/{item_id}")
-async def delete_menu_item(
-    item_id: str,
-    admin: User = Depends(get_admin)
-):
-    result = await db.menu_items.delete_one({"id": item_id})
-
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Menu item not found")
-
-    return {"message": "Menu item deleted successfully"}
 
 # --------------------------------------------------
 # ORDERS
@@ -261,6 +245,40 @@ async def my_orders(user: User = Depends(get_current_user)):
 @api_router.get("/admin/orders", response_model=List[Order])
 async def all_orders(admin: User = Depends(get_admin)):
     return await db.orders.find({}, {"_id": 0}).to_list(1000)
+
+# ✅ GET SINGLE ORDER (USER + ADMIN)
+@api_router.get("/orders/{order_id}", response_model=Order)
+async def get_order_by_id(order_id: str, user: User = Depends(get_current_user)):
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    if user.role != "admin" and order["user_id"] != user.id:
+        raise HTTPException(403, "Not allowed")
+
+    return order
+
+# ✅ UPDATE ORDER STATUS (ADMIN)
+@api_router.put("/admin/orders/{order_id}/status")
+async def update_order_status(
+    order_id: str,
+    data: OrderStatusUpdate,
+    admin: User = Depends(get_admin)
+):
+    result = await db.orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "status": data.status,
+                "updated_at": datetime.now(timezone.utc)
+            }
+        }
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(404, "Order not found")
+
+    return {"message": "Order status updated"}
 
 # --------------------------------------------------
 # TESTIMONIALS
