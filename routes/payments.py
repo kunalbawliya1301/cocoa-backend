@@ -7,10 +7,11 @@ from lib.razorpay_client import client
 
 router = APIRouter(prefix="/api/payments", tags=["Payments"])
 
-USD_TO_INR = 83  # approximate conversion rate
-
+# ----------------------------
+# CREATE ORDER
+# ----------------------------
 class CreateOrderPayload(BaseModel):
-    amount: float  # amount in USD from frontend
+    amount: float  # amount in INR (NO USD, NO CONVERSION)
 
 
 @router.post("/create-order")
@@ -19,11 +20,8 @@ def create_razorpay_order(payload: CreateOrderPayload):
         raise HTTPException(status_code=400, detail="Invalid amount")
 
     try:
-        # Convert USD → INR
-        amount_in_inr = payload.amount * USD_TO_INR
-
         order = client.order.create({
-            "amount": int(amount_in_inr * 100),  # INR → paise
+            "amount": int(payload.amount * 100),  # INR → paise
             "currency": "INR",
             "receipt": "receipt_cocoa",
             "payment_capture": 1
@@ -38,10 +36,14 @@ def create_razorpay_order(payload: CreateOrderPayload):
     except Exception as e:
         print("🔥 RAZORPAY ERROR:", repr(e))
         raise HTTPException(
-        status_code=500,
-        detail=str(e)
-    )
+            status_code=500,
+            detail="Razorpay order creation failed"
+        )
 
+
+# ----------------------------
+# VERIFY PAYMENT (KEEP THIS)
+# ----------------------------
 class VerifyPaymentPayload(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
