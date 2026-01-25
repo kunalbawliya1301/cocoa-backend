@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException
+import os
+import hmac
+import hashlib
+from fastapi import HTTPException
 from pydantic import BaseModel
 from lib.razorpay_client import client
 
@@ -39,3 +42,36 @@ def create_razorpay_order(payload: CreateOrderPayload):
         detail=str(e)
     )
 
+class VerifyPaymentPayload(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@router.post("/verify")
+def verify_payment(payload: VerifyPaymentPayload):
+    secret = os.environ.get("RAZORPAY_KEY_SECRET")
+
+    if not secret:
+        raise HTTPException(
+            status_code=500,
+            detail="Razorpay secret not configured"
+        )
+
+    message = f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}"
+
+    expected_signature = hmac.new(
+        secret.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if expected_signature != payload.razorpay_signature:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment verification failed"
+        )
+
+    return {
+        "status": "verified"
+    }
