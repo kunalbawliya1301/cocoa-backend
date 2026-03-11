@@ -1,7 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 import jwt
 from dotenv import load_dotenv
@@ -12,12 +12,31 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from starlette.middleware.cors import CORSMiddleware
 
-from routes import payments
-
 # --------------------------------------------------
 # ENV
 # --------------------------------------------------
 load_dotenv()
+
+MONGO_URL = os.environ.get("MONGO_URL", "").strip()
+DB_NAME = os.environ.get("DB_NAME", "").strip()
+JWT_SECRET = os.environ.get("JWT_SECRET", "").strip()
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.environ.get("JWT_EXPIRATION_HOURS", "720"))
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
+ADMIN_NAME = os.environ.get("ADMIN_NAME", "Cafe Admin").strip()
+
+if not MONGO_URL:
+    raise RuntimeError("MONGO_URL is required")
+if not DB_NAME:
+    raise RuntimeError("DB_NAME is required")
+if not JWT_SECRET or JWT_SECRET == "change-this":
+    raise RuntimeError("JWT_SECRET must be configured and must not be a placeholder")
 
 # --------------------------------------------------
 # APP & ROUTER
@@ -29,21 +48,17 @@ api_router = APIRouter(prefix="/api", tags=["API"])
 # DATABASE
 # --------------------------------------------------
 client = AsyncIOMotorClient(
-    os.environ.get("MONGO_URL"),
+    MONGO_URL,
     tls=True,
-    tlsAllowInvalidCertificates=True
 )
-db = client[os.environ.get("DB_NAME")]
+db = client[DB_NAME]
+app.state.db = db
 
 # --------------------------------------------------
 # SECURITY
 # --------------------------------------------------
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
-
-JWT_SECRET = os.environ.get("JWT_SECRET", "change-this")
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_HOURS = 24 * 7
 
 # --------------------------------------------------
 # WEBSOCKET CONNECTIONS
@@ -138,6 +153,10 @@ class OrderItem(BaseModel):
     price: float
     quantity: int
 
+class OrderItemCreate(BaseModel):
+    menu_item_id: str
+    quantity: int = Field(gt=0)
+
 class Order(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -151,11 +170,10 @@ class Order(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class OrderCreate(BaseModel):
-    items: List[OrderItem]
-    total_amount: float
+    items: List[OrderItemCreate]
 
 class OrderStatusUpdate(BaseModel):
-    status: str
+    status: Literal["pending", "preparing", "ready", "completed"]
 
 class Testimonial(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -307,12 +325,43 @@ async def categories():
 # --------------------------------------------------
 @api_router.post("/orders", response_model=Order)
 async def create_order(data: OrderCreate, user: User = Depends(get_current_user)):
+    if not data.items:
+        raise HTTPException(400, "Order must include at least one item")
+
+    menu_ids = [item.menu_item_id for item in data.items]
+    menu_docs = await db.menu_items.find(
+        {"id": {"$in": menu_ids}, "available": True},
+        {"_id": 0, "id": 1, "name": 1, "price": 1},
+    ).to_list(1000)
+    menu_by_id = {item["id"]: item for item in menu_docs}
+
+    normalized_items: List[OrderItem] = []
+    computed_total = 0.0
+    for item in data.items:
+        if item.quantity <= 0:
+            raise HTTPException(400, "Item quantity must be greater than 0")
+
+        menu_item = menu_by_id.get(item.menu_item_id)
+        if not menu_item:
+            raise HTTPException(400, f"Menu item unavailable: {item.menu_item_id}")
+
+        canonical_price = float(menu_item["price"])
+        computed_total += canonical_price * item.quantity
+        normalized_items.append(
+            OrderItem(
+                menu_item_id=menu_item["id"],
+                name=menu_item["name"],
+                price=canonical_price,
+                quantity=item.quantity,
+            )
+        )
+
     order = Order(
         user_id=user.id,
         user_name=user.name,
         user_email=user.email,
-        items=data.items,
-        total_amount=data.total_amount
+        items=normalized_items,
+        total_amount=round(computed_total, 2),
     )
     await db.orders.insert_one(order.model_dump())
     return order
@@ -349,18 +398,6 @@ async def all_orders(admin: User = Depends(get_admin)):
         {"_id": 0}
     ).sort("created_at", -1).to_list(1000)
     return [Order(**normalize_order_doc(order)) for order in orders]
-
-# ✅ GET SINGLE ORDER (USER + ADMIN)
-@api_router.get("/orders/{order_id}", response_model=Order)
-async def get_order_by_id(order_id: str, user: User = Depends(get_current_user)):
-    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(404, "Order not found")
-
-    if user.role != "admin" and order["user_id"] != user.id:
-        raise HTTPException(403, "Not allowed")
-
-    return Order(**normalize_order_doc(order))
 
 # ✅ UPDATE ORDER STATUS (ADMIN)
 @api_router.put("/admin/orders/{order_id}/status")
@@ -401,8 +438,29 @@ async def testimonials():
     return await db.testimonials.find({}, {"_id": 0}).to_list(100)
 
 # --------------------------------------------------
+# STARTUP
+# --------------------------------------------------
+@app.on_event("startup")
+async def startup():
+    if not ADMIN_EMAIL or not ADMIN_PASSWORD:
+        return
+
+    existing = await db.users.find_one({"email": ADMIN_EMAIL}, {"_id": 0, "id": 1})
+    if existing:
+        return
+
+    admin_user = User(email=ADMIN_EMAIL, name=ADMIN_NAME, role="admin")
+    doc = admin_user.model_dump()
+    doc["password"] = hash_password(ADMIN_PASSWORD)
+    doc["created_at"] = admin_user.created_at.isoformat()
+    await db.users.insert_one(doc)
+    print(f"Seeded admin user: {ADMIN_EMAIL}")
+
+# --------------------------------------------------
 # REGISTER ROUTERS
 # --------------------------------------------------
+from routes import payments
+
 app.include_router(api_router)
 app.include_router(payments.router)
 
@@ -449,7 +507,7 @@ async def websocket_orders_endpoint(websocket: WebSocket, token: str):
 # --------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

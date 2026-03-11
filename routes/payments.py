@@ -1,49 +1,79 @@
 import os
+import uuid
 import hmac
 import hashlib
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+
 from lib.razorpay_client import client
 
 router = APIRouter(prefix="/api/payments", tags=["Payments"])
 
-# ----------------------------
-# CREATE ORDER
-# ----------------------------
+
+class PaymentOrderItem(BaseModel):
+    menu_item_id: str
+    quantity: int = Field(gt=0)
+
+
 class CreateOrderPayload(BaseModel):
-    amount: float  # amount in INR (NO USD, NO CONVERSION)
+    items: list[PaymentOrderItem]
 
 
 @router.post("/create-order")
-def create_razorpay_order(payload: CreateOrderPayload):
-    if payload.amount <= 0:
-        raise HTTPException(status_code=400, detail="Invalid amount")
+async def create_razorpay_order(payload: CreateOrderPayload, request: Request):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Cart is empty")
+
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not initialized")
+    menu_ids = [item.menu_item_id for item in payload.items]
+    menu_docs = await db.menu_items.find(
+        {"id": {"$in": menu_ids}, "available": True},
+        {"_id": 0, "id": 1, "price": 1},
+    ).to_list(1000)
+    menu_by_id = {item["id"]: item for item in menu_docs}
+
+    total_amount = 0.0
+    for item in payload.items:
+        menu_item = menu_by_id.get(item.menu_item_id)
+        if not menu_item:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Menu item unavailable: {item.menu_item_id}",
+            )
+        total_amount += float(menu_item["price"]) * item.quantity
+
+    amount_paise = int(round(total_amount * 100))
+    if amount_paise <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
 
     try:
-        order = client.order.create({
-            "amount": int(payload.amount * 100),  # INR → paise
-            "currency": "INR",
-            "receipt": "receipt_cocoa",
-            "payment_capture": 1
-        })
+        order = client.order.create(
+            {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": f"receipt_{uuid.uuid4().hex[:12]}",
+                "payment_capture": 1,
+            }
+        )
 
         return {
             "order_id": order["id"],
             "amount": order["amount"],
-            "currency": order["currency"]
+            "currency": order["currency"],
         }
-
+    except HTTPException:
+        raise
     except Exception as e:
-        print("🔥 RAZORPAY ERROR:", repr(e))
+        print("RAZORPAY ERROR:", repr(e))
         raise HTTPException(
             status_code=500,
-            detail="Razorpay order creation failed"
+            detail="Razorpay order creation failed",
         )
 
 
-# ----------------------------
-# VERIFY PAYMENT (KEEP THIS)
-# ----------------------------
 class VerifyPaymentPayload(BaseModel):
     razorpay_order_id: str
     razorpay_payment_id: str
