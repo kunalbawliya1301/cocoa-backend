@@ -134,6 +134,7 @@ class MenuItem(BaseModel):
     ingredients: List[str]
     calories: int
     available: bool = True
+    tags: List[str] = []
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: Optional[datetime] = None
 
@@ -146,6 +147,7 @@ class MenuItemCreate(BaseModel):
     ingredients: List[str]
     calories: int
     available: bool = True
+    tags: List[str] = []
 
 class OrderItem(BaseModel):
     menu_item_id: str
@@ -166,11 +168,13 @@ class Order(BaseModel):
     items: List[OrderItem]
     total_amount: float
     status: str = "pending"
+    table_number: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class OrderCreate(BaseModel):
     items: List[OrderItemCreate]
+    table_number: Optional[str] = None
 
 class OrderStatusUpdate(BaseModel):
     status: Literal["pending", "preparing", "ready", "completed"]
@@ -218,6 +222,7 @@ def normalize_order_doc(doc: dict) -> dict:
         "items": doc.get("items", []),
         "total_amount": float(doc.get("total_amount", 0)),
         "status": doc.get("status", "pending"),
+        "table_number": doc.get("table_number", None),
         "created_at": _to_datetime(created),
         "updated_at": _to_datetime(updated),
     }
@@ -362,6 +367,7 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
         user_email=user.email,
         items=normalized_items,
         total_amount=round(computed_total, 2),
+        table_number=data.table_number,
     )
     await db.orders.insert_one(order.model_dump())
     return order
