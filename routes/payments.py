@@ -6,6 +6,7 @@ import hashlib
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from lib.rate_limiter import limiter
 from lib.razorpay_client import client
 
 router = APIRouter(prefix="/api/payments", tags=["Payments"])
@@ -21,6 +22,7 @@ class CreateOrderPayload(BaseModel):
 
 
 @router.post("/create-order")
+@limiter.limit("10/minute")
 async def create_razorpay_order(payload: CreateOrderPayload, request: Request):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Cart is empty")
