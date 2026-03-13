@@ -218,7 +218,7 @@ def set_auth_cookie(response: Response, token: str):
         value=token,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         max_age=JWT_EXPIRATION_HOURS * 60 * 60,
         path="/",
     )
@@ -228,7 +228,7 @@ def clear_auth_cookie(response: Response):
         key=AUTH_COOKIE_NAME,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
 
