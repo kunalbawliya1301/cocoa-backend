@@ -177,7 +177,8 @@ class Order(BaseModel):
     user_email: str
     items: List[OrderItem]
     total_amount: float
-    payment_status: str = "paid"
+    payment_method: Literal["online", "counter"] = "online"
+    payment_status: Literal["paid", "unpaid"] = "paid"
     status: str = "pending"
     table_number: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -185,10 +186,14 @@ class Order(BaseModel):
 
 class OrderCreate(BaseModel):
     items: List[OrderItemCreate]
+    payment_method: Literal["online", "counter"] = "online"
     table_number: Optional[str] = None
 
 class OrderStatusUpdate(BaseModel):
     status: Literal["pending", "preparing", "ready", "completed"]
+
+class OrderPaymentStatusUpdate(BaseModel):
+    payment_status: Literal["paid", "unpaid"]
 
 class Testimonial(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -245,6 +250,11 @@ def _to_datetime(value):
 def normalize_order_doc(doc: dict) -> dict:
     created = doc.get("created_at", doc.get("createdAt"))
     updated = doc.get("updated_at", doc.get("updatedAt", created))
+    payment_status = doc.get("payment_status", "paid")
+    payment_method = doc.get(
+        "payment_method",
+        "online" if payment_status == "paid" else "counter",
+    )
     normalized = {
         "id": doc.get("id", str(uuid.uuid4())),
         "user_id": doc.get("user_id", ""),
@@ -252,7 +262,8 @@ def normalize_order_doc(doc: dict) -> dict:
         "user_email": doc.get("user_email", ""),
         "items": doc.get("items", []),
         "total_amount": float(doc.get("total_amount", 0)),
-        "payment_status": doc.get("payment_status", "paid"),
+        "payment_method": payment_method,
+        "payment_status": payment_status,
         "status": doc.get("status", "pending"),
         "table_number": doc.get("table_number", None),
         "created_at": _to_datetime(created),
@@ -341,6 +352,8 @@ async def notify_admins_new_order(order: Order):
             "id": order.id,
             "user_name": order.user_name,
             "total_amount": order.total_amount,
+            "payment_method": order.payment_method,
+            "payment_status": order.payment_status,
             "table_number": order.table_number,
             "status": order.status,
             "created_at": order.created_at.isoformat(),
@@ -399,7 +412,7 @@ async def health_check():
 # --------------------------------------------------
 @api_router.get("/menu/items", response_model=List[MenuItem])
 async def get_menu(category: Optional[str] = None):
-    q = {"available": True}
+    q = {}
     if category:
         q["category"] = category
     return await db.menu_items.find(q, {"_id": 0}).to_list(1000)
@@ -501,6 +514,8 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
         user_email=user.email,
         items=normalized_items,
         total_amount=round(computed_total, 2),
+        payment_method=data.payment_method,
+        payment_status="paid" if data.payment_method == "online" else "unpaid",
         table_number=data.table_number,
     )
     await db.orders.insert_one(order.model_dump())
@@ -555,17 +570,17 @@ async def admin_analytics(admin: User = Depends(get_admin)):
 
     pipeline = [
         {
-            "$match": {
-                "payment_status": "paid",
-            }
-        },
-        {
             "$group": {
                 "_id": None,
                 "today_revenue": {
                     "$sum": {
                         "$cond": [
-                            {"$gte": ["$created_at", start_of_today]},
+                            {
+                                "$and": [
+                                    {"$eq": ["$payment_status", "paid"]},
+                                    {"$gte": ["$created_at", start_of_today]},
+                                ]
+                            },
                             "$total_amount",
                             0,
                         ]
@@ -574,7 +589,12 @@ async def admin_analytics(admin: User = Depends(get_admin)):
                 "week_revenue": {
                     "$sum": {
                         "$cond": [
-                            {"$gte": ["$created_at", seven_days_ago]},
+                            {
+                                "$and": [
+                                    {"$eq": ["$payment_status", "paid"]},
+                                    {"$gte": ["$created_at", seven_days_ago]},
+                                ]
+                            },
                             "$total_amount",
                             0,
                         ]
@@ -583,14 +603,27 @@ async def admin_analytics(admin: User = Depends(get_admin)):
                 "month_revenue": {
                     "$sum": {
                         "$cond": [
-                            {"$gte": ["$created_at", thirty_days_ago]},
+                            {
+                                "$and": [
+                                    {"$eq": ["$payment_status", "paid"]},
+                                    {"$gte": ["$created_at", thirty_days_ago]},
+                                ]
+                            },
                             "$total_amount",
                             0,
                         ]
                     }
                 },
                 "total_orders": {"$sum": 1},
-                "total_revenue": {"$sum": "$total_amount"},
+                "total_revenue": {
+                    "$sum": {
+                        "$cond": [
+                            {"$eq": ["$payment_status", "paid"]},
+                            "$total_amount",
+                            0,
+                        ]
+                    }
+                },
             }
         },
         {
@@ -647,6 +680,27 @@ async def update_order_status(
         )
 
     return {"message": "Order status updated"}
+
+@api_router.put("/admin/orders/{order_id}/payment-status")
+async def update_order_payment_status(
+    order_id: str,
+    data: OrderPaymentStatusUpdate,
+    admin: User = Depends(get_admin)
+):
+    result = await db.orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "payment_status": data.payment_status,
+                "updated_at": datetime.now(timezone.utc)
+            }
+        }
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(404, "Order not found")
+
+    return {"message": "Order payment status updated"}
 
 # --------------------------------------------------
 # TESTIMONIALS
