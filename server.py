@@ -372,7 +372,7 @@ async def signup(request: Request, data: UserCreate, response: Response):
     if await db.users.find_one({"email": data.email}):
         raise HTTPException(400, "Email exists")
 
-    user = User(email=data.email, name=data.name)
+    user = User.model_validate({"email": data.email, "name": data.name})
     doc = user.model_dump()
     doc["password"] = hash_password(data.password)
     doc["created_at"] = user.created_at.isoformat()
@@ -404,8 +404,12 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 
 @api_router.get("/health")
-async def health_check():
+async def health_check_api():
     return {"status": "ok"}
+
+@app.get("/")
+async def health_check_root():
+    return {"status": "ok", "message": "Backend is running"}
 
 # --------------------------------------------------
 # MENU
@@ -415,7 +419,11 @@ async def get_menu(category: Optional[str] = None):
     q = {}
     if category:
         q["category"] = category
-    return await db.menu_items.find(q, {"_id": 0}).to_list(1000)
+    items = await db.menu_items.find(q, {"_id": 0}).to_list(1000)
+    for i in items:
+        if not i.get("created_at"):
+            i["created_at"] = datetime.now(timezone.utc)
+    return items
 
 @api_router.post("/menu/items", response_model=MenuItem)
 async def create_menu(item: MenuItemCreate, admin: User = Depends(get_admin)):
@@ -432,7 +440,7 @@ async def update_menu_item(item_id: str, item: MenuItemCreate, admin: User = Dep
     updated = {
         **item.model_dump(),
         "id": item_id,
-        "created_at": existing.get("created_at"),
+        "created_at": existing.get("created_at") or datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc)
     }
 
@@ -470,7 +478,37 @@ async def update_menu_item_availability(
 
 @api_router.get("/menu/categories")
 async def categories():
-    return {"categories": await db.menu_items.distinct("category")}
+    raw_categories = await db.menu_items.distinct("category")
+    parsed = set()
+    for cat in raw_categories:
+        if cat:
+            for c in cat.split(","):
+                parsed.add(c.strip())
+    return {"categories": sorted(list(parsed))}
+
+@api_router.get("/menu/top-items")
+async def top_items():
+    # Calculate top 5 most ordered items from the past 30 days
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
+    
+    pipeline = [
+        {"$match": {"created_at": {"$gte": thirty_days_ago}}},
+        {"$unwind": "$items"},
+        {
+            "$group": {
+                "_id": "$items.menu_item_id",
+                "total_quantity": {"$sum": "$items.quantity"}
+            }
+        },
+        {"$sort": {"total_quantity": -1}},
+        {"$limit": 5}
+    ]
+    
+    result = await db.orders.aggregate(pipeline).to_list(10)
+    top_ids = [item["_id"] for item in result if item.get("_id")]
+    
+    return {"top_items": top_ids}
 
 # --------------------------------------------------
 # ORDERS
