@@ -403,11 +403,11 @@ async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-@api_router.get("/health")
+@api_router.api_route("/health", methods=["GET", "HEAD"])
 async def health_check_api():
     return {"status": "ok"}
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def health_check_root():
     return {"status": "ok", "message": "Backend is running"}
 
